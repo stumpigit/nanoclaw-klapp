@@ -1,3 +1,4 @@
+import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -449,7 +450,89 @@ export async function processTaskIpc(
       }
       break;
 
-    default:
-      logger.warn({ type: data.type }, 'Unknown IPC task type');
+    default: {
+      const handled = await handleKlappIpcInline(data as Record<string, unknown>, sourceGroup, DATA_DIR);
+      if (!handled) {
+        logger.warn({ type: data.type }, 'Unknown IPC task type');
+      }
+    }
   }
+}
+
+/**
+ * Klapp integration IPC handler.
+ * Spawns .claude/skills/klapp/scripts/<script>.ts via npx tsx and writes results.
+ */
+async function handleKlappIpcInline(
+  data: Record<string, unknown>,
+  sourceGroup: string,
+  dataDir: string,
+): Promise<boolean> {
+  const type = data.type as string;
+  if (!type?.startsWith('klapp_')) return false;
+
+  const requestId = data.requestId as string;
+  if (!requestId) {
+    logger.warn({ type }, 'Klapp IPC blocked: missing requestId');
+    return true;
+  }
+
+  logger.info({ type, requestId, sourceGroup }, 'Processing Klapp request');
+
+  let result: { success: boolean; message: string; messages?: unknown[] };
+
+  if (type === 'klapp_read_messages') {
+    result = await runKlappScript('read-messages');
+  } else {
+    return false;
+  }
+
+  const resultsDir = path.join(dataDir, 'ipc', sourceGroup, 'klapp_results');
+  fs.mkdirSync(resultsDir, { recursive: true });
+  fs.writeFileSync(path.join(resultsDir, `${requestId}.json`), JSON.stringify(result));
+
+  if (result.success) {
+    logger.info({ type, requestId }, 'Klapp request completed');
+  } else {
+    logger.error({ type, requestId, message: result.message }, 'Klapp request failed');
+  }
+  return true;
+}
+
+function runKlappScript(script: string): Promise<{ success: boolean; message: string; messages?: unknown[] }> {
+  const scriptPath = path.join(process.cwd(), '.claude', 'skills', 'klapp', 'scripts', `${script}.ts`);
+  return new Promise((resolve) => {
+    const proc = spawn('npx', ['tsx', scriptPath], {
+      cwd: process.cwd(),
+      env: { ...process.env, NANOCLAW_ROOT: process.cwd() },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+    proc.stdout.on('data', (d) => { stdout += d.toString(); });
+    proc.stderr.on('data', (d) => { stderr += d.toString(); });
+    proc.stdin.end();
+
+    const timer = setTimeout(() => {
+      proc.kill('SIGTERM');
+      resolve({ success: false, message: 'Klapp script timed out (120s)' });
+    }, 120_000);
+
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      if (stderr) logger.debug({ script, stderr: stderr.slice(0, 500) }, 'Klapp script stderr');
+      try {
+        const lines = stdout.trim().split('\n');
+        resolve(JSON.parse(lines[lines.length - 1]));
+      } catch {
+        resolve({ success: false, message: `Klapp script exited ${code}. ${stderr.slice(0, 300)}` });
+      }
+    });
+
+    proc.on('error', (err) => {
+      clearTimeout(timer);
+      resolve({ success: false, message: `Failed to spawn klapp script: ${err.message}` });
+    });
+  });
 }

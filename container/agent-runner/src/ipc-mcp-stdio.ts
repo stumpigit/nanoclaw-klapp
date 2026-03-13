@@ -333,6 +333,80 @@ Use available_groups.json to find the JID for a group. The folder name must be c
   },
 );
 
+// ---------------------------------------------------------------------------
+// Klapp integration
+// ---------------------------------------------------------------------------
+
+const KLAPP_RESULTS_DIR = path.join(IPC_DIR, 'klapp_results');
+
+async function waitForKlappResult(
+  requestId: string,
+  maxWait = 90_000,
+): Promise<{ success: boolean; message: string; messages?: unknown[] }> {
+  const resultFile = path.join(KLAPP_RESULTS_DIR, `${requestId}.json`);
+  const poll = 1000;
+  let elapsed = 0;
+  while (elapsed < maxWait) {
+    if (fs.existsSync(resultFile)) {
+      try {
+        const r = JSON.parse(fs.readFileSync(resultFile, 'utf-8'));
+        fs.unlinkSync(resultFile);
+        return r;
+      } catch (err) {
+        return { success: false, message: `Failed to read klapp result: ${err}` };
+      }
+    }
+    await new Promise((r) => setTimeout(r, poll));
+    elapsed += poll;
+  }
+  return { success: false, message: 'Klapp request timed out (90s)' };
+}
+
+server.tool(
+  'klapp_read_messages',
+  `Read messages from Klapp (klapp.mobi school communication platform).
+
+Logs into Klapp using stored credentials and returns recent messages from the inbox.
+Credentials are loaded from groups/global/secrets.env on the host.`,
+  {
+    limit: z.number().int().min(1).max(50).default(20).optional().describe('Maximum number of messages to return (default 20)'),
+  },
+  async (_args) => {
+    const requestId = `klapp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    writeIpcFile(TASKS_DIR, {
+      type: 'klapp_read_messages',
+      requestId,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+
+    const result = await waitForKlappResult(requestId);
+
+    if (!result.success) {
+      return {
+        content: [{ type: 'text' as const, text: `Klapp error: ${result.message}` }],
+        isError: true,
+      };
+    }
+
+    const messages = result.messages ?? [];
+    if (messages.length === 0) {
+      return { content: [{ type: 'text' as const, text: 'No messages found in Klapp inbox.' }] };
+    }
+
+    const formatted = (messages as Array<Record<string, string>>)
+      .map((m, i) =>
+        `[${i + 1}] Von: ${m.sender || '?'}\n    Betreff: ${m.subject || '?'}\n    ${m.preview || ''}\n    ${m.date ? new Date(m.date).toLocaleString('de-DE') : ''}`,
+      )
+      .join('\n\n');
+
+    return {
+      content: [{ type: 'text' as const, text: `Klapp Nachrichten (${messages.length}):\n\n${formatted}` }],
+    };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);
