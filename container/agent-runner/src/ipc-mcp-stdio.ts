@@ -396,9 +396,16 @@ Credentials are loaded from groups/global/secrets.env on the host.`,
     }
 
     const formatted = (messages as Array<Record<string, string>>)
-      .map((m, i) =>
-        `[${i + 1}] Von: ${m.sender || '?'}\n    Betreff: ${m.subject || '?'}\n    ${m.preview || ''}\n    ${m.date ? new Date(m.date).toLocaleString('de-DE') : ''}`,
-      )
+      .map((m, i) => {
+        const lines = [
+          `[${i + 1}] Von: ${m.sender || '?'}`,
+          `    Betreff: ${m.subject || '?'}`,
+          `    Datum: ${m.date || '?'}`,
+        ];
+        const body = m.content || m.preview || '';
+        if (body) lines.push(`    Inhalt: ${body}`);
+        return lines.join('\n');
+      })
       .join('\n\n');
 
     return {
