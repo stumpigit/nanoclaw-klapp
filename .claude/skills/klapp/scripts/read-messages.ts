@@ -128,18 +128,15 @@ async function fetchMessageContent(
   messageId: string,
   authHeaders: Record<string, string>,
 ): Promise<string> {
-  const url = `${API_BASE}${MESSAGES_API_PATH}/${messageId}`;
+  // Detail endpoint: /v4/messages/{id}/parent — body is in replies[0].body
+  const url = `${API_BASE}/v4/messages/${messageId}/parent?include_drafts=true`;
   try {
-    const result = await page.evaluate(
-      async ({ url, headers }: { url: string; headers: Record<string, string> }) => {
-        const resp = await fetch(url, { headers });
-        if (!resp.ok) return null;
-        return resp.json() as Promise<Record<string, unknown>>;
-      },
-      { url, headers: authHeaders },
-    );
-    if (result && typeof result === 'object') {
-      return extractContent(result as Record<string, unknown>);
+    const response = await page.request.get(url, { headers: authHeaders });
+    if (!response.ok()) return '';
+    const data = await response.json() as Record<string, unknown>;
+    const replies = data.replies as Record<string, unknown>[] | undefined;
+    if (replies && replies.length > 0) {
+      return extractContent(replies[0]);
     }
   } catch { /* ignore */ }
   return '';
@@ -163,9 +160,11 @@ async function run(): Promise<ScriptResult> {
     context.on('request', (req) => {
       if (req.url().includes('api.klapp.mobi')) {
         const h = req.headers();
-        if (h['authorization']) authHeaders['authorization'] = h['authorization'];
-        if (h['x-api-key']) authHeaders['x-api-key'] = h['x-api-key'];
-        if (h['x-auth-token']) authHeaders['x-auth-token'] = h['x-auth-token'];
+        // Capture all API request headers so per-message fetches include app-specific headers
+        // (app-model, user-role, app-version, etc.) that the server requires
+        for (const [key, value] of Object.entries(h)) {
+          authHeaders[key] = value;
+        }
       }
     });
 
@@ -206,12 +205,11 @@ async function run(): Promise<ScriptResult> {
       return { success: false, message: 'No messages received from API. Try again or check data/klapp-screenshots/.' };
     }
 
-    // Fetch full content for each message if auth headers are available
-    if (Object.keys(authHeaders).length > 0) {
-      for (const msg of messages) {
-        if (!msg.content) {
-          msg.content = await fetchMessageContent(page, msg.id, authHeaders);
-        }
+    // Fetch full content for each message
+    // Use captured auth headers if available; cookies are always included via credentials:'include'
+    for (const msg of messages) {
+      if (!msg.content) {
+        msg.content = await fetchMessageContent(page, msg.id, authHeaders);
       }
     }
 
